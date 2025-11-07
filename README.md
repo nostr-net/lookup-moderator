@@ -1,94 +1,407 @@
-# lookup-moderator
+# Lookup Moderator
 
-A Python script that monitors multiple Nostr relays for kind 1984 (moderation/reporting) events pertaining to events used in [thelookup](https://github.com/nostr-net/thelookup).
+A Python-based moderation system for Nostr relays running [strfry](https://github.com/hoytech/strfry/), specifically designed for [thelookup](https://github.com/nostr-net/thelookup) content moderation.
 
-## What is Kind 1984?
+This system monitors **wot.nostr.net** (a Web of Trust filtered relay) for [kind 1984 moderation reports](https://nostrbook.dev/kinds/1984), tracks them in a database, and automatically deletes heavily reported content from your strfry relay.
 
-Kind 1984 events are used for reporting and moderation on Nostr. They allow users to report content or other users for various reasons like spam, illegal content, impersonation, etc. See [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md) and [Nostr Book - Kind 1984](https://nostrbook.dev/kinds/1984) for more details.
+## How It Works
+
+```
+wot.nostr.net → Monitor Daemon → SQLite DB → strfry delete
+     ↓              ↓
+(kind 1984)   Track reports              Delete reported events
+(WoT filtered)  Count threshold           (when threshold met)
+```
+
+1. **Monitor**: Connects to wot.nostr.net and listens for kind 1984 (reporting) events
+2. **Track**: Stores reports in SQLite database with timestamps and report types
+3. **Delete**: When report threshold is met, uses `strfry delete` CLI to remove content
+4. **Publish** (optional): Publishes kind 5 delete events to relays
+
+**Why wot.nostr.net?** It already filters events by Web of Trust, so you only see reports from trusted users in your network. No need to build WoT yourself!
 
 ## Features
 
-- Connect to multiple Nostr relays simultaneously
-- Monitor for kind 1984 moderation events in real-time
-- Filter events by specific event IDs or pubkeys (optional)
-- Built using Rust-based Nostr Python bindings (nostr-sdk)
+- **Simple**: Single daemon, no plugins needed
+- **WoT-filtered**: Only processes reports from wot.nostr.net (pre-filtered by your trust network)
+- **Configurable thresholds**: Different limits per report type (illegal=1, spam=5, etc.)
+- **Time-windowed**: Only count recent reports (default 30 days)
+- **Auto-delete**: Automatically removes content using strfry CLI
+- **Delete events**: Optionally publishes kind 5 delete events
+- **SQLite database**: Persistent report tracking
+- **Systemd ready**: Easy deployment as a service
 
 ## Installation
 
-1. Clone this repository:
+### Prerequisites
+
+- Python 3.8+
+- [strfry](https://github.com/hoytech/strfry/) relay
+
+### Quick Start
+
 ```bash
+# Clone repository
 git clone https://github.com/nostr-net/lookup-moderator.git
 cd lookup-moderator
-```
 
-2. Install Python dependencies:
-```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Configure
+cp config.yaml.example config.yaml
+nano config.yaml  # Edit configuration
+
+# Run
+python3 lookup_moderator.py
 ```
 
 ## Configuration
 
-You can configure the script using environment variables. Copy the example file:
+Edit `config.yaml`:
 
-```bash
-cp .env.example .env
+```yaml
+# WoT Relay (wot.nostr.net already filters by your WoT)
+wot_relay:
+  url: "wss://wot.nostr.net"
+
+  # Optional: For publishing delete events
+  pubkey: "your_pubkey_hex"
+  private_key: "nsec_or_hex"  # Keep secure!
+
+# Moderation settings
+moderation:
+  report_threshold: 3  # Default reports needed
+  time_window_days: 30  # Only count recent reports
+  auto_delete: true     # Auto-delete when threshold met
+
+  # Type-specific thresholds
+  type_thresholds:
+    illegal: 1          # Immediate removal
+    malware: 1
+    spam: 5             # More tolerance
+    impersonation: 2
+
+# Strfry configuration
+strfry:
+  executable: "/usr/local/bin/strfry"
+  data_dir: "/var/lib/strfry"  # Directory with strfry.conf
+
+  # Publish kind 5 delete events
+  publish_deletes: true
+  publish_relays:
+    - "wss://wot.nostr.net"
+
+# Event kinds to monitor (thelookup-specific)
+events:
+  monitored_kinds:
+    - 30817  # Custom NIPs
+    - 31990  # Application directory
 ```
 
-Then edit `.env` to configure:
+### Important Notes
 
-- `RELAYS`: Comma-separated list of relay URLs to connect to
-- `LOOKUP_EVENT_IDS`: (Optional) Comma-separated list of event IDs to filter for
-- `LOOKUP_PUBKEYS`: (Optional) Comma-separated list of pubkeys to filter for
-
-Example `.env`:
-```
-RELAYS=wss://relay.damus.io,wss://relay.nostr.band,wss://nos.lol
-LOOKUP_EVENT_IDS=event_id_1,event_id_2
-LOOKUP_PUBKEYS=pubkey_1,pubkey_2
-```
-
-If no `.env` file is present, the script will use default relays.
+- **wot.nostr.net**: The relay already filters by your Web of Trust, so you only see reports from trusted users
+- **private_key**: Only needed if you want to publish kind 5 delete events (optional)
+- **strfry paths**: Adjust `executable` and `data_dir` to match your installation
 
 ## Usage
 
-Run the script:
+### Run Directly
 
 ```bash
 python3 lookup_moderator.py
+
+# With custom config
+python3 lookup_moderator.py --config /path/to/config.yaml
 ```
 
-Or make it executable and run directly:
+### Run as Systemd Service (Recommended)
+
+Create `/etc/systemd/system/lookup-moderator.service`:
+
+```ini
+[Unit]
+Description=Lookup Moderator - Nostr Moderation Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=strfry
+WorkingDirectory=/path/to/lookup-moderator
+ExecStart=/usr/bin/python3 /path/to/lookup-moderator/lookup_moderator.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
 
 ```bash
-chmod +x lookup_moderator.py
-./lookup_moderator.py
+sudo systemctl enable lookup-moderator
+sudo systemctl start lookup-moderator
+sudo systemctl status lookup-moderator
 ```
 
-The script will:
-1. Connect to all configured relays
-2. Subscribe to kind 1984 events
-3. Monitor and display relevant moderation events in real-time
-4. Continue running until interrupted with Ctrl+C
+### Monitor Logs
 
-## Output
+```bash
+# Real-time logs
+tail -f moderator.log
 
-When a relevant moderation event is detected, the script will display:
-- Event ID
-- Author (pubkey)
-- Timestamp
-- Content (the report details)
-- Tags (including referenced events and pubkeys)
+# Systemd logs
+sudo journalctl -u lookup-moderator -f
+```
 
-## Requirements
+## How Deletion Works
 
-- Python 3.8+
-- nostr-sdk (Rust-based Nostr Python bindings)
-- python-dotenv
+When a report threshold is reached:
 
-## About thelookup
+1. **Strfry CLI Delete**: Executes `strfry delete --dir /path --id <event_id>`
+   - Removes event from local strfry database
+   - Immediate local deletion
 
-[thelookup](https://github.com/nostr-net/thelookup) is a Nostr-based lookup service. This moderator script helps monitor moderation reports related to events and users in that system.
+2. **Publish Delete Event** (optional): Creates and publishes kind 5 event
+   - Notifies other relays to delete the content
+   - Per [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md)
+   - Requires private key in config
+
+## Report Types (NIP-56)
+
+Per [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md):
+
+- `nudity` - Explicit content
+- `malware` - Malicious software
+- `profanity` - Hateful/offensive speech
+- `illegal` - Potentially illegal content
+- `spam` - Unsolicited messages
+- `impersonation` - False identity
+- `other` - Other issues
+
+Set different thresholds per type in config.
+
+## Database
+
+SQLite database stores:
+- All kind 1984 reports
+- Reporter pubkeys
+- Report types and timestamps
+- Reported event IDs
+
+**Location**: `./moderation_reports.db` (configurable)
+
+**Auto-cleanup**: Old reports are automatically removed based on `time_window_days × 2`
+
+### Query Database
+
+```bash
+# View all reports
+sqlite3 moderation_reports.db "SELECT * FROM reports;"
+
+# Count reports per event
+sqlite3 moderation_reports.db "
+  SELECT reported_event_id, COUNT(*) as count
+  FROM reports
+  GROUP BY reported_event_id
+  ORDER BY count DESC;
+"
+
+# Reports by type
+sqlite3 moderation_reports.db "
+  SELECT report_type, COUNT(*) as count
+  FROM reports
+  GROUP BY report_type;
+"
+```
+
+## Example Output
+
+```
+================================================================================
+Lookup Moderator - Nostr Kind 1984 Event Monitor
+================================================================================
+Database stats:
+  Total reports: 47
+  Unique reported events: 12
+  Unique reporters: 23
+
+Configuration:
+  WoT Relay: wss://wot.nostr.net
+  Report threshold: 3
+  Time window: 30 days
+  Auto-delete: True
+  Monitored kinds: [30817, 31990]
+
+Connecting to wss://wot.nostr.net...
+  Added relay: wss://wot.nostr.net
+Connected to relay!
+Subscribing to kind 1984 moderation events...
+Monitoring started. Press Ctrl+C to stop.
+
+================================================================================
+NEW MODERATION REPORT
+Report ID: abc123def456...
+Reporter: 789pubkey012...
+Reported Event: xyz789event...
+Report Type: spam
+Content: This is spam content reported by user
+Total reports: 3 (threshold: 3)
+THRESHOLD REACHED - Event should be deleted!
+Auto-delete enabled, deleting event...
+Executing: /usr/local/bin/strfry delete --dir /var/lib/strfry --id xyz789event...
+Successfully deleted event xyz789event... from strfry
+Published delete event for xyz789event... to 1 relays
+Event xyz789event... deleted successfully
+================================================================================
+```
+
+## Troubleshooting
+
+### Strfry delete command fails
+
+**Check paths:**
+```bash
+which strfry  # Should match config.yaml executable path
+ls -la /var/lib/strfry  # Should exist and contain strfry.conf
+```
+
+**Check permissions:**
+```bash
+# Make sure the user running the script can execute strfry
+sudo -u strfry /usr/local/bin/strfry delete --help
+```
+
+**Test manually:**
+```bash
+# Try deleting an event manually
+/usr/local/bin/strfry delete --dir /var/lib/strfry --id <some_event_id>
+```
+
+### Not seeing any reports
+
+- Make sure wot.nostr.net is accessible: `curl -I https://wot.nostr.net`
+- Check you're in someone's Web of Trust (wot.nostr.net filters by WoT)
+- Verify monitored_kinds includes the events being reported
+- Check logs for connection errors
+
+### Delete events not being published
+
+- Make sure `private_key` is set in config
+- Verify `publish_deletes: true`
+- Check `publish_relays` list is not empty
+- Look for errors in logs about key parsing
+
+## Security Considerations
+
+### Private Key Storage
+
+If publishing delete events:
+- Store `config.yaml` with restricted permissions: `chmod 600 config.yaml`
+- Consider using environment variables for private key
+- Or use a dedicated moderation keypair (not your main key)
+
+### Trust Model
+
+- **WoT filtering**: wot.nostr.net only shows reports from your trust network
+- **Threshold-based**: Multiple reports required (configurable)
+- **Time-bounded**: Old reports expire
+- **Transparent**: All reports in local database
+
+### Attack Vectors
+
+1. **Report spam**: Mitigated by WoT filtering (only trusted reporters)
+2. **False reports**: Mitigated by threshold requirements
+3. **Stale reports**: Mitigated by time windows
+4. **Mass deletion**: Set appropriate thresholds per type
+
+## Performance
+
+- **CPU**: Low (event-driven)
+- **Memory**: ~50-100 MB
+- **Network**: Minimal (single relay connection)
+- **Disk**: Database grows ~1 KB per report
+- **Latency**: Delete executes within seconds of threshold
+
+## Development
+
+### Project Structure
+
+```
+lookup-moderator/
+├── lookup_moderator.py        # Main monitoring daemon
+├── moderation_db.py           # SQLite database abstraction
+├── config.yaml.example        # Configuration template
+├── requirements.txt           # Python dependencies
+└── README.md                  # This file
+```
+
+### Testing
+
+```bash
+# Test database
+python3 -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'); print('OK')"
+
+# Test config loading
+python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')))"
+
+# Dry run (auto_delete: false in config)
+python3 lookup_moderator.py
+```
+
+## FAQ
+
+**Q: Do I need to run my own relay?**
+A: Yes, you need a strfry relay to delete content from.
+
+**Q: Can I use other relays besides wot.nostr.net?**
+A: Technically yes, but you'd lose the WoT filtering. wot.nostr.net is recommended because it already filters by your trust network.
+
+**Q: What if I don't want to auto-delete?**
+A: Set `auto_delete: false` in config. The script will log when threshold is met but won't delete.
+
+**Q: Can I moderate kinds other than 30817/31990?**
+A: Yes, add them to `events.monitored_kinds` in config.
+
+**Q: How do I know what's in my WoT on wot.nostr.net?**
+A: wot.nostr.net uses your follow list (kind 3) and follows-of-follows. If you publish a follow list, you're in the network.
+
+**Q: Can I run this without publishing delete events?**
+A: Yes! Just leave `private_key` empty or set `publish_deletes: false`. The local deletion will still work.
+
+## Contributing
+
+Contributions welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
 ## License
 
 See LICENSE file for details.
+
+## About
+
+### Related Projects
+
+- [thelookup](https://github.com/nostr-net/thelookup) - Nostr ecosystem directory
+- [strfry](https://github.com/hoytech/strfry/) - High-performance Nostr relay
+- [nostr-sdk](https://github.com/rust-nostr/nostr) - Rust Nostr SDK with Python bindings
+- [wot.nostr.net](https://wot.nostr.net) - Web of Trust filtered relay
+
+### NIP References
+
+- [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) - Basic protocol
+- [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) - Event deletion (kind 5)
+- [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md) - Reporting (kind 1984)
+
+## Support
+
+- GitHub Issues: https://github.com/nostr-net/lookup-moderator/issues
+
+---
+
+Built for the Nostr ecosystem

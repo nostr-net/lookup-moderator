@@ -1,0 +1,79 @@
+# Lookup Moderator Configuration
+
+# WoT Relay Settings
+wot_relay:
+  # WoT relay to monitor for kind 1984 events
+  # wot.nostr.net already filters events by your WoT
+  url: "wss://wot.nostr.net"
+
+  # Your pubkey (for publishing delete events)
+  # Optional: only needed if you want to publish delete events to the relay
+  pubkey: ""
+
+  # Your private key (nsec format or hex)
+  # Optional: only needed if you want to publish delete events
+  # WARNING: Keep this secure! Only needed for delete event publishing
+  private_key: ""
+
+# Moderation Thresholds
+moderation:
+  # Number of unique reports required to trigger deletion
+  report_threshold: 3
+
+  # Time window in days - only count reports within this period
+  time_window_days: 30
+
+  # Specific thresholds per report type (overrides report_threshold)
+  type_thresholds:
+    illegal: 1      # Immediate action for illegal content
+    malware: 1      # Immediate action for malware
+    spam: 5         # More tolerance for spam reports
+    impersonation: 2
+
+  # Auto-delete events that meet threshold
+  auto_delete: true
+
+# Strfry Settings
+strfry:
+  # Path to strfry executable
+  executable: "/usr/local/bin/strfry"
+
+  # Path to strfry database directory
+  # Usually the directory containing strfry.conf
+  data_dir: "/var/lib/strfry"
+
+  # Also publish delete events (kind 5) to relays
+  publish_deletes: true
+
+  # Relays to publish delete events to
+  publish_relays:
+    - "wss://wot.nostr.net"
+
+# Event Kinds to Monitor
+events:
+  # Event kinds that can be moderated (thelookup-specific)
+  monitored_kinds:
+    - 30817  # Custom NIPs
+    - 31990  # Application directory entries
+
+# Database Settings
+database:
+  # Path to SQLite database file
+  path: "./moderation_reports.db"
+
+  # Cleanup old reports beyond time window
+  auto_cleanup: true
+
+  # Cleanup interval in hours
+  cleanup_interval_hours: 24
+
+# Logging
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+
+  # Log file path (leave empty for stdout only)
+  file: "./moderator.log"
+
+  # Log format
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
