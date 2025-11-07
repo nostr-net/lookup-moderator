@@ -21,16 +21,48 @@ try:
         ClientBuilder,
         Filter,
         Kind,
-        KindEnum,
         Event,
         EventId,
         PublicKey,
         RelayOptions,
-        Options,
+        ClientOptions,
+        RelayUrl,
+        HandleNotification,
+        Timestamp,
     )
 except ImportError:
     print("Error: nostr-sdk not installed. Please run: pip install nostr-sdk")
     sys.exit(1)
+
+
+class NotificationHandler(HandleNotification):
+    """Handle notifications from Nostr relays."""
+    
+    def __init__(self, moderator):
+        """Initialize with reference to moderator."""
+        super().__init__()
+        self.moderator = moderator
+    
+    def handle(self, relay_url, notification):
+        """Handle incoming notification."""
+        try:
+            # Try to get event from notification
+            # The notification object varies, so we need to check its type
+            notification_str = str(type(notification))
+            
+            # Try to access the event if available
+            if hasattr(notification, 'event'):
+                event = notification.event()
+                if self.moderator.is_relevant_event(event):
+                    self.moderator.print_moderation_event(event)
+        except Exception as e:
+            # Silently ignore errors to avoid breaking the handler
+            pass
+    
+    def handle_msg(self, relay_url, msg):
+        """Handle incoming relay message."""
+        # We'll use handle() instead
+        pass
 
 
 class LookupModerator:
@@ -49,22 +81,24 @@ class LookupModerator:
         self.lookup_event_ids: Set[str] = set(lookup_event_ids or [])
         self.lookup_pubkeys: Set[str] = set(lookup_pubkeys or [])
         self.client = None
+        self.seen_event_ids: Set[str] = set()  # Track seen events to avoid duplicates
 
     async def connect(self):
         """Connect to all configured relays."""
         print(f"Connecting to {len(self.relays)} relays...")
         
         # Create client with options
-        opts = Options()
+        opts = ClientOptions()
         self.client = ClientBuilder().opts(opts).build()
         
         # Add relays
-        for relay_url in self.relays:
+        for relay_url_str in self.relays:
             try:
+                relay_url = RelayUrl.parse(relay_url_str)
                 await self.client.add_relay(relay_url)
-                print(f"  Added relay: {relay_url}")
+                print(f"  Added relay: {relay_url_str}")
             except Exception as e:
-                print(f"  Failed to add relay {relay_url}: {e}")
+                print(f"  Failed to add relay {relay_url_str}: {e}")
         
         # Connect to relays
         await self.client.connect()
@@ -78,7 +112,7 @@ class LookupModerator:
         # Kind 1984 is used for reporting/moderation
         filter_kind = Filter().kind(Kind(1984))
         
-        await self.client.subscribe([filter_kind])
+        await self.client.subscribe(filter_kind)
         print("Subscription active. Monitoring for moderation events...\n")
 
     def is_relevant_event(self, event: Event) -> bool:
@@ -124,10 +158,18 @@ class LookupModerator:
         Args:
             event: The moderation event to print
         """
+        event_id = event.id().to_hex()
+        
+        # Check if we've already seen this event
+        if event_id in self.seen_event_ids:
+            return
+        
+        self.seen_event_ids.add(event_id)
+        
         print("=" * 80)
         print(f"MODERATION EVENT DETECTED")
         print("=" * 80)
-        print(f"Event ID: {event.id().to_hex()}")
+        print(f"Event ID: {event_id}")
         print(f"Author: {event.author().to_hex()}")
         print(f"Created: {event.created_at().as_secs()}")
         print(f"Content: {event.content()}")
@@ -145,26 +187,12 @@ class LookupModerator:
         print("Monitoring started. Press Ctrl+C to stop.\n")
         
         try:
-            # Handle notifications
-            while True:
-                notifications = await self.client.notifications()
-                async for notification in notifications:
-                    notification_str = str(notification)
-                    
-                    # Check if this is an event notification
-                    if "RelayPoolNotification::Event" in notification_str:
-                        try:
-                            # Get the event from the notification
-                            event = notification.event()
-                            
-                            # Check if event is relevant
-                            if self.is_relevant_event(event):
-                                self.print_moderation_event(event)
-                        except Exception as e:
-                            print(f"Error processing event: {e}")
-                
-                # Small delay to prevent busy waiting
-                await asyncio.sleep(0.1)
+            # Create notification handler
+            handler = NotificationHandler(self)
+            
+            # Start handling notifications in the background
+            # Note: handle_notifications is blocking, so we run it as the main loop
+            await self.client.handle_notifications(handler)
                 
         except KeyboardInterrupt:
             print("\nStopping monitor...")
