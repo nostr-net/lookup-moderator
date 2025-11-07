@@ -183,7 +183,7 @@ class LookupModerator:
         # Create filter for kind 1984 events
         filter_kind = Filter().kind(Kind(1984))
 
-        await self.client.subscribe([filter_kind])
+        await self.client.subscribe(filter_kind)
         logger.info("Subscription active. Monitoring for moderation events...")
 
     async def delete_event_from_strfry(self, event_id: str) -> bool:
