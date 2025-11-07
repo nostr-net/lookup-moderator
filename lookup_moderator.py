@@ -68,7 +68,7 @@ class NotificationHandler(HandleNotification):
         super().__init__()
         self.moderator = moderator
 
-    def handle(self, relay_url, notification):
+    def handle(self, relay_url, subscription_id, notification):
         """Handle incoming notification."""
         try:
             if hasattr(notification, "event"):
