@@ -35,7 +35,7 @@ moderation:
 
   # Dry run mode - show what would be done without executing
   # When enabled: logs commands and actions without actually running them
-  dry_run: false
+  dry_run: true
 
 # Strfry Settings
 strfry:
