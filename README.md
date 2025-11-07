@@ -36,9 +36,11 @@ wot.nostr.net → Monitor Daemon → SQLite DB → strfry delete
 ### Prerequisites
 
 - Python 3.8+
-- [strfry](https://github.com/hoytech/strfry/) relay
+- [strfry](https://github.com/hoytech/strfry/) relay (only needed for actual deletion, not for dry run)
 
 ### Quick Start
+
+**Using pip:**
 
 ```bash
 # Clone repository
@@ -55,6 +57,154 @@ nano config.yaml  # Edit configuration
 # Run
 python3 lookup_moderator.py
 ```
+
+**Using uv (recommended for faster installs):**
+
+```bash
+# Clone repository
+git clone https://github.com/nostr-net/lookup-moderator.git
+cd lookup-moderator
+
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv pip install -r requirements.txt
+
+# Or use uv to run directly
+uv run lookup_moderator.py
+
+# Configure
+cp config.yaml.example config.yaml
+nano config.yaml  # Edit configuration
+```
+
+## Dry Run Mode - Test Before You Delete!
+
+**Want to see what the tool finds without actually deleting anything?** Use dry run mode!
+
+Dry run mode lets you:
+- Monitor what reports are coming in from wot.nostr.net
+- See which events would be deleted based on your thresholds
+- Test your configuration safely without making any changes
+- Understand what content is being reported in your network
+
+### Quick Dry Run Setup
+
+1. **Copy the example config:**
+   ```bash
+   cp config.yaml.example config.yaml
+   ```
+
+2. **Enable dry run mode in config.yaml:**
+   ```yaml
+   moderation:
+     dry_run: true      # Enable dry run mode
+     auto_delete: true  # Can be true or false, no deletion happens in dry run
+   ```
+
+3. **Run the tool:**
+   ```bash
+   # Using Python
+   python3 lookup_moderator.py
+
+   # Or using uv
+   uv run lookup_moderator.py
+   ```
+
+### Example Dry Run Configurations
+
+**Example 1: Monitor everything, see what would be deleted**
+```yaml
+moderation:
+  report_threshold: 3
+  time_window_days: 30
+  auto_delete: true
+  dry_run: true  # Nothing will actually be deleted
+
+strfry:
+  executable: "/usr/local/bin/strfry"  # Path doesn't need to exist in dry run
+  data_dir: "/var/lib/strfry"          # Path doesn't need to exist in dry run
+  publish_deletes: true  # Would publish, but won't in dry run mode
+```
+
+**Example 2: Test strict illegal content moderation**
+```yaml
+moderation:
+  report_threshold: 3
+  time_window_days: 7  # Shorter window for testing
+
+  type_thresholds:
+    illegal: 1   # See what gets flagged immediately
+    malware: 1
+    spam: 5
+
+  auto_delete: true
+  dry_run: true  # Safe to test strict settings
+```
+
+**Example 3: Monitor without auto-delete intent**
+```yaml
+moderation:
+  report_threshold: 3
+  auto_delete: false  # Just monitor, don't even simulate deletion
+  dry_run: true       # Extra safety
+```
+
+### What You'll See in Dry Run Mode
+
+When a report threshold is reached, you'll see output like:
+
+```
+================================================================================
+NEW MODERATION REPORT
+Report ID: abc123def456...
+Reporter: 789pubkey012...
+Reported Event: xyz789event...
+Report Type: spam
+Content: This is spam content reported by user
+Total reports: 3 (threshold: 3)
+THRESHOLD REACHED - Event should be deleted!
+[DRY RUN MODE] Simulating deletion process...
+Auto-delete enabled, deleting event...
+[DRY RUN] Would execute: /usr/local/bin/strfry delete --dir /var/lib/strfry --id xyz789event...
+[DRY RUN] Would delete event xyz789event... from strfry
+[DRY RUN] Would publish kind 5 delete event for xyz789event...
+[DRY RUN] Would publish to relays: ['wss://wot.nostr.net']
+[DRY RUN] Reason: Reported 3 times: spam
+Event xyz789event... deleted successfully
+================================================================================
+```
+
+Notice all the `[DRY RUN]` prefixes - no actual commands are executed!
+
+### Moving from Dry Run to Production
+
+Once you're satisfied with what you see:
+
+1. **Update config.yaml:**
+   ```yaml
+   moderation:
+     dry_run: false  # Disable dry run mode
+   ```
+
+2. **Verify strfry paths are correct:**
+   ```bash
+   which strfry
+   ls -la /var/lib/strfry/strfry.conf
+   ```
+
+3. **Test strfry delete manually:**
+   ```bash
+   /usr/local/bin/strfry delete --help
+   ```
+
+4. **Restart the moderator:**
+   ```bash
+   python3 lookup_moderator.py
+   # Or with systemd
+   sudo systemctl restart lookup-moderator
+   ```
 
 ## Configuration
 
@@ -109,6 +259,7 @@ events:
 
 ### Run Directly
 
+**Using Python:**
 ```bash
 python3 lookup_moderator.py
 
@@ -116,7 +267,23 @@ python3 lookup_moderator.py
 python3 lookup_moderator.py --config /path/to/config.yaml
 ```
 
+**Using uv:**
+```bash
+uv run lookup_moderator.py
+
+# With custom config
+uv run lookup_moderator.py --config /path/to/config.yaml
+
+# Or create a virtual environment and run
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -r requirements.txt
+python lookup_moderator.py
+```
+
 ### Run as Systemd Service (Recommended)
+
+**Using Python:**
 
 Create `/etc/systemd/system/lookup-moderator.service`:
 
@@ -132,6 +299,28 @@ WorkingDirectory=/path/to/lookup-moderator
 ExecStart=/usr/bin/python3 /path/to/lookup-moderator/lookup_moderator.py
 Restart=always
 RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Using uv:**
+
+Create `/etc/systemd/system/lookup-moderator.service`:
+
+```ini
+[Unit]
+Description=Lookup Moderator - Nostr Moderation Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=strfry
+WorkingDirectory=/path/to/lookup-moderator
+ExecStart=/home/user/.cargo/bin/uv run /path/to/lookup-moderator/lookup_moderator.py
+Restart=always
+RestartSec=10
+Environment="PATH=/home/user/.cargo/bin:/usr/local/bin:/usr/bin"
 
 [Install]
 WantedBy=multi-user.target
@@ -333,12 +522,14 @@ lookup-moderator/
 ├── lookup_moderator.py        # Main monitoring daemon
 ├── moderation_db.py           # SQLite database abstraction
 ├── config.yaml.example        # Configuration template
-├── requirements.txt           # Python dependencies
+├── requirements.txt           # Python dependencies (pip)
+├── pyproject.toml             # Project metadata (uv/pip)
 └── README.md                  # This file
 ```
 
 ### Testing
 
+**Test with Python:**
 ```bash
 # Test database
 python3 -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'); print('OK')"
@@ -346,14 +537,48 @@ python3 -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'
 # Test config loading
 python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')))"
 
-# Dry run (auto_delete: false in config)
+# Test in dry run mode (recommended!)
+cp config.yaml.example config.yaml
+# Edit config.yaml and set dry_run: true
 python3 lookup_moderator.py
 ```
 
+**Test with uv:**
+```bash
+# Install dependencies
+uv pip install -r requirements.txt
+
+# Test database
+uv run python -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'); print('OK')"
+
+# Test config loading
+uv run python -c "import yaml; print(yaml.safe_load(open('config.yaml')))"
+
+# Test in dry run mode (recommended!)
+cp config.yaml.example config.yaml
+# Edit config.yaml and set dry_run: true
+uv run lookup_moderator.py
+```
+
+**Quick Dry Run Test:**
+The easiest way to test the tool is with dry run mode enabled. This lets you:
+- Verify your configuration is correct
+- See what reports are coming in
+- Understand what would be deleted without actually deleting anything
+- Test without needing strfry installed
+
+See the "Dry Run Mode" section above for detailed examples.
+
 ## FAQ
 
+**Q: How do I test the tool without deleting anything?**
+A: Enable dry run mode! Set `dry_run: true` in the moderation section of config.yaml. The tool will show you what it would do without executing any commands. See the "Dry Run Mode" section above for examples.
+
+**Q: Do I need strfry installed to test in dry run mode?**
+A: No! Dry run mode doesn't execute any strfry commands, so you can test the monitoring and reporting logic without having strfry installed.
+
 **Q: Do I need to run my own relay?**
-A: Yes, you need a strfry relay to delete content from.
+A: Yes, you need a strfry relay to delete content from (but not for dry run testing).
 
 **Q: Can I use other relays besides wot.nostr.net?**
 A: Technically yes, but you'd lose the WoT filtering. wot.nostr.net is recommended because it already filters by your trust network.
@@ -369,6 +594,9 @@ A: wot.nostr.net uses your follow list (kind 3) and follows-of-follows. If you p
 
 **Q: Can I run this without publishing delete events?**
 A: Yes! Just leave `private_key` empty or set `publish_deletes: false`. The local deletion will still work.
+
+**Q: Should I use pip or uv?**
+A: Either works! uv is faster for installing dependencies and managing Python versions, but pip is more universally available. Use whichever you prefer.
 
 ## Contributing
 
