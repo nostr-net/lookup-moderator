@@ -248,12 +248,12 @@ Reported Event: xyz789event...
 Report Type: spam
 Content: This is spam content reported by user
 Total reports: 3 (threshold: 3)
-⚠️  THRESHOLD REACHED - Event should be deleted!
+THRESHOLD REACHED - Event should be deleted!
 Auto-delete enabled, deleting event...
 Executing: /usr/local/bin/strfry delete --dir /var/lib/strfry --id xyz789event...
 Successfully deleted event xyz789event... from strfry
 Published delete event for xyz789event... to 1 relays
-✓ Event xyz789event... deleted successfully
+Event xyz789event... deleted successfully
 ================================================================================
 ```
 
@@ -404,4 +404,4 @@ See LICENSE file for details.
 
 ---
 
-**Built with ⚡ for the Nostr ecosystem**
+Built for the Nostr ecosystem

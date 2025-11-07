@@ -346,7 +346,7 @@ class LookupModerator:
             logger.info(f"Total reports: {count} (threshold: {threshold})")
 
             if should_delete:
-                logger.warning(f"⚠️  THRESHOLD REACHED - Event should be deleted!")
+                logger.warning(f"THRESHOLD REACHED - Event should be deleted!")
 
                 if self.auto_delete:
                     logger.info(f"Auto-delete enabled, deleting event...")
@@ -361,9 +361,9 @@ class LookupModerator:
                                 reported_event_id,
                                 f"Reported {count} times: {report_type or 'various reasons'}"
                             )
-                        logger.info(f"✓ Event {reported_event_id[:16]}... deleted successfully")
+                        logger.info(f"Event {reported_event_id[:16]}... deleted successfully")
                     else:
-                        logger.error(f"✗ Failed to delete event {reported_event_id[:16]}...")
+                        logger.error(f"Failed to delete event {reported_event_id[:16]}...")
                 else:
                     logger.info("Auto-delete disabled. Manual action required.")
 
