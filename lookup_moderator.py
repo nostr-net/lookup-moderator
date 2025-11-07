@@ -110,6 +110,7 @@ class LookupModerator:
         self.time_window_days = mod_config.get("time_window_days", 30)
         self.type_thresholds = mod_config.get("type_thresholds", {})
         self.auto_delete = mod_config.get("auto_delete", True)
+        self.dry_run = mod_config.get("dry_run", False)
 
         strfry_config = self.config.get("strfry", {})
         self.strfry_executable = strfry_config.get("executable", "/usr/local/bin/strfry")
@@ -205,6 +206,12 @@ class LookupModerator:
                 "--id", event_id
             ]
 
+            # Dry run mode - just log what would be executed
+            if self.dry_run:
+                logger.info(f"[DRY RUN] Would execute: {' '.join(cmd)}")
+                logger.info(f"[DRY RUN] Would delete event {event_id[:16]}... from strfry")
+                return True  # Simulate success
+
             logger.info(f"Executing: {' '.join(cmd)}")
 
             result = subprocess.run(
@@ -237,6 +244,13 @@ class LookupModerator:
             reason: Reason for deletion
         """
         if not self.keys or not self.publish_deletes:
+            return
+
+        # Dry run mode - just log what would be published
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would publish kind 5 delete event for {event_id[:16]}...")
+            logger.info(f"[DRY RUN] Would publish to relays: {self.publish_relays}")
+            logger.info(f"[DRY RUN] Reason: {reason}")
             return
 
         try:
@@ -348,6 +362,9 @@ class LookupModerator:
             if should_delete:
                 logger.warning(f"THRESHOLD REACHED - Event should be deleted!")
 
+                if self.dry_run:
+                    logger.warning(f"[DRY RUN MODE] Simulating deletion process...")
+
                 if self.auto_delete:
                     logger.info(f"Auto-delete enabled, deleting event...")
 
@@ -422,6 +439,9 @@ class LookupModerator:
         logger.info(f"  Report threshold: {self.report_threshold}")
         logger.info(f"  Time window: {self.time_window_days} days")
         logger.info(f"  Auto-delete: {self.auto_delete}")
+        logger.info(f"  Dry run: {self.dry_run}")
+        if self.dry_run:
+            logger.warning("  DRY RUN MODE ENABLED - No actions will be executed!")
         logger.info(f"  Monitored kinds: {sorted(self.monitored_kinds)}")
         logger.info("")
 
