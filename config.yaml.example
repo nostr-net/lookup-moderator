@@ -1,0 +1,78 @@
+# Lookup Moderator Configuration
+
+# Web of Trust Settings
+wot:
+  # Source pubkey whose WoT network to use for trusted reporters
+  # Reports only count if they come from pubkeys in this WoT
+  # IMPORTANT: Set this to YOUR pubkey in hex format (not npub1...)
+  source_pubkey: ""  # TODO: Set your WoT source pubkey here
+
+  # WoT depth (1 = direct follows, 2 = follows of follows, etc.)
+  depth: 2
+
+  # Cache duration in hours before refreshing WoT
+  cache_hours: 24
+
+# Moderation Thresholds
+moderation:
+  # Number of unique WoT reports required to trigger content removal
+  report_threshold: 3
+
+  # Time window in days - only count reports within this period
+  time_window_days: 30
+
+  # Specific thresholds per report type (overrides report_threshold)
+  # If not specified, uses report_threshold
+  type_thresholds:
+    illegal: 1      # Immediate action for illegal content
+    malware: 1      # Immediate action for malware
+    spam: 5         # More tolerance for spam reports
+    impersonation: 2
+    # nudity, profanity, other - use default report_threshold
+
+# Relay Configuration
+relays:
+  # Relays to monitor for kind 1984 moderation events
+  monitor:
+    - "wss://relay.damus.io"
+    - "wss://relay.nostr.band"
+    - "wss://nos.lol"
+    - "wss://relay.snort.social"
+    - "wss://nostr.wine"
+
+# Event Kinds to Monitor
+events:
+  # thelookup-specific event kinds that can be moderated
+  monitored_kinds:
+    - 30817  # Custom NIPs
+    - 31990  # Application directory entries
+
+# Database Settings
+database:
+  # Path to SQLite database file
+  path: "./moderation_reports.db"
+
+  # Cleanup old reports beyond time window
+  auto_cleanup: true
+
+  # Cleanup interval in hours
+  cleanup_interval_hours: 24
+
+# Logging
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+
+  # Log file path (leave empty for stdout only)
+  file: "./moderator.log"
+
+  # Log format
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Strfry Plugin Settings
+strfry_plugin:
+  # Rejection message template
+  rejection_message: "Content has been reported {count} times by trusted network members"
+
+  # Whether to include report details in rejection
+  verbose_rejection: false

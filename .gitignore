@@ -28,6 +28,16 @@ env/
 # Environment variables
 .env
 
+# Configuration (use config.yaml.example as template)
+config.yaml
+
+# Database
+*.db
+*.db-journal
+
+# Logs
+*.log
+
 # IDE
 .vscode/
 .idea/

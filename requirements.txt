@@ -1,2 +1,8 @@
-nostr-sdk>=0.32.0
+# Nostr SDK - Rust-based Python bindings for Nostr
+nostr-sdk>=0.35.0
+
+# Configuration management
+PyYAML>=6.0.2
+
+# Previously used dependencies (for backwards compatibility)
 python-dotenv>=1.0.0
