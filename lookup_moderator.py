@@ -2,21 +2,19 @@
 """
 Nostr Lookup Moderator
 
-This script monitors multiple Nostr relays for kind 1984 (moderation/reporting) events
-that pertain to events used in thelookup (https://github.com/nostr-net/thelookup).
+Monitors wot.nostr.net for kind 1984 (moderation/reporting) events
+pertaining to thelookup content. When enough reports are received,
+deletes the reported content from strfry relay.
 
-It uses Web of Trust (WoT) to only accept reports from trusted pubkeys and stores
-them in a database for use by the strfry plugin.
-
-Kind 1984 events are used for reporting content and users on Nostr:
-https://nostrbook.dev/kinds/1984
+wot.nostr.net already filters events by Web of Trust, so we don't
+need to build WoT ourselves.
 """
 
 import asyncio
 import logging
 import sys
-from typing import List, Set, Optional
-from pathlib import Path
+import subprocess
+from typing import Set, Optional
 import yaml
 import signal
 
@@ -27,16 +25,18 @@ try:
         Filter,
         Kind,
         Event,
+        Keys,
+        EventBuilder,
         RelayUrl,
         ClientOptions,
         HandleNotification,
+        Timestamp,
     )
 except ImportError:
     print("Error: nostr-sdk not installed. Please run: pip install nostr-sdk")
     sys.exit(1)
 
 from moderation_db import ModerationDB
-from wot_fetcher import WoTFetcher
 
 
 # Configure logging
@@ -71,7 +71,6 @@ class NotificationHandler(HandleNotification):
     def handle(self, relay_url, notification):
         """Handle incoming notification."""
         try:
-            # Try to get event from notification
             if hasattr(notification, "event"):
                 event = notification.event()
                 if event.kind().as_u16() == 1984:
@@ -87,7 +86,7 @@ class NotificationHandler(HandleNotification):
 
 
 class LookupModerator:
-    """Monitor Nostr relays for kind 1984 moderation events."""
+    """Monitor wot.nostr.net for kind 1984 moderation events and delete reported content."""
 
     def __init__(self, config_path: str = "config.yaml"):
         """
@@ -101,18 +100,22 @@ class LookupModerator:
         setup_logging(self.config)
 
         # Extract config values
-        wot_config = self.config.get("wot", {})
-        self.source_pubkey = wot_config.get("source_pubkey", "")
-        self.wot_depth = wot_config.get("depth", 2)
-        self.wot_cache_hours = wot_config.get("cache_hours", 24)
+        wot_config = self.config.get("wot_relay", {})
+        self.wot_relay_url = wot_config.get("url", "wss://wot.nostr.net")
+        self.pubkey = wot_config.get("pubkey", "")
+        self.private_key = wot_config.get("private_key", "")
 
         mod_config = self.config.get("moderation", {})
         self.report_threshold = mod_config.get("report_threshold", 3)
         self.time_window_days = mod_config.get("time_window_days", 30)
         self.type_thresholds = mod_config.get("type_thresholds", {})
+        self.auto_delete = mod_config.get("auto_delete", True)
 
-        relay_config = self.config.get("relays", {})
-        self.monitor_relays = relay_config.get("monitor", [])
+        strfry_config = self.config.get("strfry", {})
+        self.strfry_executable = strfry_config.get("executable", "/usr/local/bin/strfry")
+        self.strfry_data_dir = strfry_config.get("data_dir", "/var/lib/strfry")
+        self.publish_deletes = strfry_config.get("publish_deletes", True)
+        self.publish_relays = strfry_config.get("publish_relays", [])
 
         event_config = self.config.get("events", {})
         self.monitored_kinds = set(event_config.get("monitored_kinds", [30817, 31990]))
@@ -122,28 +125,21 @@ class LookupModerator:
         self.auto_cleanup = db_config.get("auto_cleanup", True)
         self.cleanup_interval_hours = db_config.get("cleanup_interval_hours", 24)
 
-        # Validate config
-        if not self.source_pubkey:
-            logger.error("ERROR: source_pubkey not set in config.yaml!")
-            logger.error("Please set wot.source_pubkey to your pubkey (hex format)")
-            sys.exit(1)
-
-        if not self.monitor_relays:
-            logger.warning("No monitor relays configured, using defaults")
-            self.monitor_relays = [
-                "wss://relay.damus.io",
-                "wss://relay.nostr.band",
-                "wss://nos.lol",
-            ]
-
         # Initialize components
         self.db = ModerationDB(db_path)
-        self.wot_fetcher = WoTFetcher(self.monitor_relays, self.wot_cache_hours)
-        self.wot_pubkeys: Set[str] = set()
-
         self.client: Optional[Client] = None
+        self.keys: Optional[Keys] = None
         self.seen_event_ids: Set[str] = set()
         self.running = False
+
+        # Initialize keys if private key provided
+        if self.private_key and self.publish_deletes:
+            try:
+                self.keys = Keys.parse(self.private_key)
+                logger.info(f"Loaded keys for pubkey: {self.keys.public_key().to_hex()[:16]}...")
+            except Exception as e:
+                logger.warning(f"Failed to parse private key: {e}")
+                logger.warning("Delete events will not be published")
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -158,58 +154,26 @@ class LookupModerator:
             logger.error(f"Error loading config: {e}")
             sys.exit(1)
 
-    async def init_wot(self):
-        """Initialize Web of Trust network."""
-        logger.info("Initializing Web of Trust...")
-        logger.info(f"Source pubkey: {self.source_pubkey[:16]}...")
-        logger.info(f"WoT depth: {self.wot_depth}")
-
-        # Try to load from database cache first
-        cached_wot = self.db.get_wot_cache()
-        cache_age = self.db.get_wot_cache_age()
-
-        if cached_wot and cache_age:
-            from datetime import datetime, timedelta
-
-            age_hours = (datetime.now() - cache_age).total_seconds() / 3600
-            if age_hours < self.wot_cache_hours:
-                logger.info(
-                    f"Loaded WoT from database cache: {len(cached_wot)} pubkeys "
-                    f"(age: {age_hours:.1f}h)"
-                )
-                self.wot_pubkeys = cached_wot
-                return
-
-        # Build fresh WoT
-        self.wot_pubkeys = await self.wot_fetcher.get_wot_cached(
-            self.source_pubkey, self.wot_depth, force_refresh=True
-        )
-
-        # Cache in database
-        self.db.update_wot_cache(self.wot_pubkeys)
-
-        logger.info(f"WoT initialized with {len(self.wot_pubkeys)} trusted pubkeys")
-
     async def connect(self):
-        """Connect to all configured relays."""
-        logger.info(f"Connecting to {len(self.monitor_relays)} relays...")
+        """Connect to wot.nostr.net relay."""
+        logger.info(f"Connecting to {self.wot_relay_url}...")
 
-        # Create client with options
+        # Create client
         opts = ClientOptions()
         self.client = ClientBuilder().opts(opts).build()
 
-        # Add relays
-        for relay_url_str in self.monitor_relays:
-            try:
-                relay_url = RelayUrl.parse(relay_url_str)
-                await self.client.add_relay(relay_url)
-                logger.info(f"  Added relay: {relay_url_str}")
-            except Exception as e:
-                logger.warning(f"  Failed to add relay {relay_url_str}: {e}")
+        # Add relay
+        try:
+            relay_url = RelayUrl.parse(self.wot_relay_url)
+            await self.client.add_relay(relay_url)
+            logger.info(f"  Added relay: {self.wot_relay_url}")
+        except Exception as e:
+            logger.error(f"  Failed to add relay {self.wot_relay_url}: {e}")
+            raise
 
-        # Connect to relays
+        # Connect to relay
         await self.client.connect()
-        logger.info("Connected to relays!")
+        logger.info("Connected to relay!")
 
     async def subscribe_to_moderation_events(self):
         """Subscribe to kind 1984 moderation events."""
@@ -220,6 +184,83 @@ class LookupModerator:
 
         await self.client.subscribe([filter_kind])
         logger.info("Subscription active. Monitoring for moderation events...")
+
+    async def delete_event_from_strfry(self, event_id: str) -> bool:
+        """
+        Delete an event from strfry database using CLI.
+
+        Args:
+            event_id: Event ID to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Run strfry delete command
+            # strfry delete --id <event_id>
+            cmd = [
+                self.strfry_executable,
+                "delete",
+                "--dir", self.strfry_data_dir,
+                "--id", event_id
+            ]
+
+            logger.info(f"Executing: {' '.join(cmd)}")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0:
+                logger.info(f"Successfully deleted event {event_id[:16]}... from strfry")
+                return True
+            else:
+                logger.error(f"Failed to delete event: {result.stderr}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout deleting event {event_id[:16]}...")
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting event from strfry: {e}")
+            return False
+
+    async def publish_delete_event(self, event_id: str, reason: str = "Moderation"):
+        """
+        Publish a kind 5 delete event.
+
+        Args:
+            event_id: Event ID to delete
+            reason: Reason for deletion
+        """
+        if not self.keys or not self.publish_deletes:
+            return
+
+        try:
+            # Create kind 5 delete event
+            # According to NIP-09, kind 5 events have "e" tags for events to delete
+            event_builder = EventBuilder.delete([event_id], reason)
+
+            event = await event_builder.to_event(self.keys)
+
+            # Publish to configured relays
+            for relay_url_str in self.publish_relays:
+                try:
+                    relay_url = RelayUrl.parse(relay_url_str)
+                    # Add relay if not already added
+                    await self.client.add_relay(relay_url)
+                except Exception as e:
+                    logger.warning(f"Failed to add relay {relay_url_str}: {e}")
+
+            # Send event
+            output = await self.client.send_event(event)
+            logger.info(f"Published delete event for {event_id[:16]}... to {len(self.publish_relays)} relays")
+
+        except Exception as e:
+            logger.error(f"Error publishing delete event: {e}")
 
     async def process_moderation_event(self, event: Event):
         """
@@ -237,16 +278,8 @@ class LookupModerator:
 
         reporter_pubkey = event.author().to_hex()
 
-        # Check if reporter is in WoT
-        if reporter_pubkey not in self.wot_pubkeys:
-            logger.debug(
-                f"Ignoring report from non-WoT pubkey: {reporter_pubkey[:8]}..."
-            )
-            return
-
         # Extract report details from tags
         reported_event_id = None
-        reported_event_kind = None
         report_type = None
 
         for tag in event.tags():
@@ -257,7 +290,7 @@ class LookupModerator:
                 # Extract event being reported
                 if tag_name == "e":
                     reported_event_id = tag_list[1]
-                    # Report type may be third parameter
+                    # Report type may be third parameter (per NIP-56)
                     if len(tag_list) >= 4:
                         report_type = tag_list[3]
 
@@ -270,15 +303,11 @@ class LookupModerator:
         report_content = event.content()
         timestamp = event.created_at().as_secs()
 
-        # Try to determine the kind of reported event by querying
-        # For now, we'll accept all reports and filter in the plugin
-        # In production, you might want to query the event first
-
         # Store in database
         success = self.db.add_report(
             report_event_id=event_id,
             reported_event_id=reported_event_id,
-            reported_event_kind=reported_event_kind,
+            reported_event_kind=None,  # We don't know the kind yet
             reporter_pubkey=reporter_pubkey,
             report_type=report_type,
             report_content=report_content,
@@ -288,9 +317,9 @@ class LookupModerator:
         if success:
             # Log the report
             logger.info("=" * 80)
-            logger.info(f"NEW MODERATION REPORT (from WoT)")
+            logger.info(f"NEW MODERATION REPORT")
             logger.info(f"Report ID: {event_id[:16]}...")
-            logger.info(f"Reporter: {reporter_pubkey[:16]}... (trusted)")
+            logger.info(f"Reporter: {reporter_pubkey[:16]}...")
             logger.info(f"Reported Event: {reported_event_id[:16]}...")
             if report_type:
                 logger.info(f"Report Type: {report_type}")
@@ -299,10 +328,45 @@ class LookupModerator:
             # Get current report count
             count = self.db.get_report_count(
                 reported_event_id,
-                wot_pubkeys=self.wot_pubkeys,
+                wot_pubkeys=None,  # wot.nostr.net already filters
                 time_window_days=self.time_window_days,
             )
-            logger.info(f"Total reports for this event: {count}")
+
+            # Check if we should delete this event
+            should_delete = False
+            threshold = self.report_threshold
+
+            # Check type-specific threshold
+            if report_type and report_type in self.type_thresholds:
+                threshold = self.type_thresholds[report_type]
+
+            if count >= threshold:
+                should_delete = True
+
+            logger.info(f"Total reports: {count} (threshold: {threshold})")
+
+            if should_delete:
+                logger.warning(f"⚠️  THRESHOLD REACHED - Event should be deleted!")
+
+                if self.auto_delete:
+                    logger.info(f"Auto-delete enabled, deleting event...")
+
+                    # Delete from strfry
+                    deleted = await self.delete_event_from_strfry(reported_event_id)
+
+                    if deleted:
+                        # Publish delete event if configured
+                        if self.publish_deletes:
+                            await self.publish_delete_event(
+                                reported_event_id,
+                                f"Reported {count} times: {report_type or 'various reasons'}"
+                            )
+                        logger.info(f"✓ Event {reported_event_id[:16]}... deleted successfully")
+                    else:
+                        logger.error(f"✗ Failed to delete event {reported_event_id[:16]}...")
+                else:
+                    logger.info("Auto-delete disabled. Manual action required.")
+
             logger.info("=" * 80)
 
     async def cleanup_task(self):
@@ -316,23 +380,8 @@ class LookupModerator:
                 logger.info(f"Running cleanup of reports older than {cleanup_days} days")
                 self.db.cleanup_old_reports(cleanup_days)
 
-    async def wot_refresh_task(self):
-        """Periodic refresh of WoT."""
-        while self.running:
-            await asyncio.sleep(self.wot_cache_hours * 3600)
-
-            logger.info("Refreshing Web of Trust...")
-            try:
-                self.wot_pubkeys = await self.wot_fetcher.get_wot_cached(
-                    self.source_pubkey, self.wot_depth, force_refresh=True
-                )
-                self.db.update_wot_cache(self.wot_pubkeys)
-                logger.info(f"WoT refreshed: {len(self.wot_pubkeys)} pubkeys")
-            except Exception as e:
-                logger.error(f"Error refreshing WoT: {e}")
-
     async def monitor(self):
-        """Monitor relays for moderation events."""
+        """Monitor relay for moderation events."""
         logger.info("Monitoring started. Press Ctrl+C to stop.\n")
 
         self.running = True
@@ -340,7 +389,6 @@ class LookupModerator:
         try:
             # Start background tasks
             cleanup_task = asyncio.create_task(self.cleanup_task())
-            wot_refresh_task = asyncio.create_task(self.wot_refresh_task())
 
             # Create notification handler
             handler = NotificationHandler(self)
@@ -366,14 +414,19 @@ class LookupModerator:
         logger.info(f"  Total reports: {stats['total_reports']}")
         logger.info(f"  Unique reported events: {stats['unique_reported_events']}")
         logger.info(f"  Unique reporters: {stats['unique_reporters']}")
-        logger.info(f"  WoT cache size: {stats['wot_cache_size']}")
+        logger.info("")
+
+        # Show config
+        logger.info(f"Configuration:")
+        logger.info(f"  WoT Relay: {self.wot_relay_url}")
+        logger.info(f"  Report threshold: {self.report_threshold}")
+        logger.info(f"  Time window: {self.time_window_days} days")
+        logger.info(f"  Auto-delete: {self.auto_delete}")
+        logger.info(f"  Monitored kinds: {sorted(self.monitored_kinds)}")
         logger.info("")
 
         try:
-            # Initialize WoT
-            await self.init_wot()
-
-            # Connect to relays
+            # Connect to relay
             await self.connect()
 
             # Subscribe to moderation events
@@ -390,8 +443,7 @@ class LookupModerator:
             # Cleanup
             if self.client:
                 await self.client.shutdown()
-            await self.wot_fetcher.shutdown()
-            logger.info("Disconnected from relays.")
+            logger.info("Disconnected from relay.")
 
             # Show final stats
             stats = self.db.get_stats()
@@ -405,7 +457,7 @@ async def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Monitor Nostr relays for moderation reports"
+        description="Monitor wot.nostr.net for moderation reports and delete content from strfry"
     )
     parser.add_argument(
         "--config",

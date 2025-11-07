@@ -1,48 +1,57 @@
 # Lookup Moderator Configuration
 
-# Web of Trust Settings
-wot:
-  # Source pubkey whose WoT network to use for trusted reporters
-  # Reports only count if they come from pubkeys in this WoT
-  # IMPORTANT: Set this to YOUR pubkey in hex format (not npub1...)
-  source_pubkey: ""  # TODO: Set your WoT source pubkey here
+# WoT Relay Settings
+wot_relay:
+  # WoT relay to monitor for kind 1984 events
+  # wot.nostr.net already filters events by your WoT
+  url: "wss://wot.nostr.net"
 
-  # WoT depth (1 = direct follows, 2 = follows of follows, etc.)
-  depth: 2
+  # Your pubkey (for publishing delete events)
+  # Optional: only needed if you want to publish delete events to the relay
+  pubkey: ""
 
-  # Cache duration in hours before refreshing WoT
-  cache_hours: 24
+  # Your private key (nsec format or hex)
+  # Optional: only needed if you want to publish delete events
+  # WARNING: Keep this secure! Only needed for delete event publishing
+  private_key: ""
 
 # Moderation Thresholds
 moderation:
-  # Number of unique WoT reports required to trigger content removal
+  # Number of unique reports required to trigger deletion
   report_threshold: 3
 
   # Time window in days - only count reports within this period
   time_window_days: 30
 
   # Specific thresholds per report type (overrides report_threshold)
-  # If not specified, uses report_threshold
   type_thresholds:
     illegal: 1      # Immediate action for illegal content
     malware: 1      # Immediate action for malware
     spam: 5         # More tolerance for spam reports
     impersonation: 2
-    # nudity, profanity, other - use default report_threshold
 
-# Relay Configuration
-relays:
-  # Relays to monitor for kind 1984 moderation events
-  monitor:
-    - "wss://relay.damus.io"
-    - "wss://relay.nostr.band"
-    - "wss://nos.lol"
-    - "wss://relay.snort.social"
-    - "wss://nostr.wine"
+  # Auto-delete events that meet threshold
+  auto_delete: true
+
+# Strfry Settings
+strfry:
+  # Path to strfry executable
+  executable: "/usr/local/bin/strfry"
+
+  # Path to strfry database directory
+  # Usually the directory containing strfry.conf
+  data_dir: "/var/lib/strfry"
+
+  # Also publish delete events (kind 5) to relays
+  publish_deletes: true
+
+  # Relays to publish delete events to
+  publish_relays:
+    - "wss://wot.nostr.net"
 
 # Event Kinds to Monitor
 events:
-  # thelookup-specific event kinds that can be moderated
+  # Event kinds that can be moderated (thelookup-specific)
   monitored_kinds:
     - 30817  # Custom NIPs
     - 31990  # Application directory entries
@@ -68,11 +77,3 @@ logging:
 
   # Log format
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-# Strfry Plugin Settings
-strfry_plugin:
-  # Rejection message template
-  rejection_message: "Content has been reported {count} times by trusted network members"
-
-  # Whether to include report details in rejection
-  verbose_rejection: false

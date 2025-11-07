@@ -1,148 +1,122 @@
 # Lookup Moderator
 
-A comprehensive moderation system for Nostr relays running [strfry](https://github.com/hoytech/strfry/), specifically designed for [thelookup](https://github.com/nostr-net/thelookup) content moderation.
+A Python-based moderation system for Nostr relays running [strfry](https://github.com/hoytech/strfry/), specifically designed for [thelookup](https://github.com/nostr-net/thelookup) content moderation.
 
-This system monitors multiple Nostr relays for [kind 1984 moderation reports](https://nostrbook.dev/kinds/1984), tracks them using Web of Trust (WoT) filtering, and integrates with strfry to automatically reject heavily reported content.
+This system monitors **wot.nostr.net** (a Web of Trust filtered relay) for [kind 1984 moderation reports](https://nostrbook.dev/kinds/1984), tracks them in a database, and automatically deletes heavily reported content from your strfry relay.
+
+## How It Works
+
+```
+wot.nostr.net → Monitor Daemon → SQLite DB → strfry delete
+     ↓              ↓
+(kind 1984)   Track reports              Delete reported events
+(WoT filtered)  Count threshold           (when threshold met)
+```
+
+1. **Monitor**: Connects to wot.nostr.net and listens for kind 1984 (reporting) events
+2. **Track**: Stores reports in SQLite database with timestamps and report types
+3. **Delete**: When report threshold is met, uses `strfry delete` CLI to remove content
+4. **Publish** (optional): Publishes kind 5 delete events to relays
+
+**Why wot.nostr.net?** It already filters events by Web of Trust, so you only see reports from trusted users in your network. No need to build WoT yourself!
 
 ## Features
 
-### Core Features
-- **Multi-relay monitoring**: Connect to multiple Nostr relays to gather kind 1984 moderation reports
-- **Web of Trust filtering**: Only accept reports from pubkeys in your WoT network (prevents spam/abuse)
-- **Persistent storage**: SQLite database tracks all reports with timestamps
-- **Configurable thresholds**: Set different thresholds per report type (illegal, spam, etc.)
-- **Time-windowed reports**: Only count reports within a configurable time window
-- **Strfry integration**: Write policy plugin for automatic content rejection
-
-### Security & Trust
-- Reports only counted from pubkeys in your Web of Trust (WoT)
-- WoT built by querying follow lists (kind 3 events) with configurable depth
-- Unique reporter counting (one report per pubkey)
-- Configurable report thresholds per type
-
-## Architecture
-
-The system consists of two components:
-
-1. **Monitoring Daemon** (`lookup_moderator.py`): Continuously monitors Nostr relays for kind 1984 events, validates reporters against WoT, and stores reports in database
-2. **Strfry Plugin** (`strfry_moderation_plugin.py`): Integrates with strfry to reject events based on report counts from database
-
-```
-┌─────────────────┐
-│  Nostr Relays   │
-│   (External)    │
-└────────┬────────┘
-         │ kind 1984 events
-         ▼
-┌─────────────────┐      ┌──────────────┐
-│ Lookup Monitor  │─────▶│   SQLite DB  │
-│   (Daemon)      │      │   (Reports)  │
-└─────────────────┘      └──────┬───────┘
-                                │
-                                │ Query reports
-                                ▼
-                         ┌──────────────┐
-                         │    Strfry    │
-                         │    Plugin    │
-                         └──────┬───────┘
-                                │
-                                ▼
-                         ┌──────────────┐
-                         │Your Relay    │
-                         │  (strfry)    │
-                         └──────────────┘
-```
+- **Simple**: Single daemon, no plugins needed
+- **WoT-filtered**: Only processes reports from wot.nostr.net (pre-filtered by your trust network)
+- **Configurable thresholds**: Different limits per report type (illegal=1, spam=5, etc.)
+- **Time-windowed**: Only count recent reports (default 30 days)
+- **Auto-delete**: Automatically removes content using strfry CLI
+- **Delete events**: Optionally publishes kind 5 delete events
+- **SQLite database**: Persistent report tracking
+- **Systemd ready**: Easy deployment as a service
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- [strfry](https://github.com/hoytech/strfry/) relay (for plugin integration)
+- Python 3.8+
+- [strfry](https://github.com/hoytech/strfry/) relay
 
-### Step 1: Clone Repository
+### Quick Start
 
 ```bash
+# Clone repository
 git clone https://github.com/nostr-net/lookup-moderator.git
 cd lookup-moderator
-```
 
-### Step 2: Install Dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-Or with a virtual environment (recommended):
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Step 3: Configure
-
-Copy the example configuration and edit it:
-
-```bash
+# Configure
 cp config.yaml.example config.yaml
-nano config.yaml  # or your preferred editor
+nano config.yaml  # Edit configuration
+
+# Run
+python3 lookup_moderator.py
 ```
 
-**Important**: You MUST set `wot.source_pubkey` to your pubkey (hex format). This is the pubkey whose Web of Trust network will be used to validate reporters.
+## Configuration
 
-### Key Configuration Options
+Edit `config.yaml`:
 
 ```yaml
-# Set your pubkey here (REQUIRED)
-wot:
-  source_pubkey: "YOUR_PUBKEY_HEX"
-  depth: 2  # 1=direct follows, 2=follows-of-follows
+# WoT Relay (wot.nostr.net already filters by your WoT)
+wot_relay:
+  url: "wss://wot.nostr.net"
+
+  # Optional: For publishing delete events
+  pubkey: "your_pubkey_hex"
+  private_key: "nsec_or_hex"  # Keep secure!
 
 # Moderation settings
 moderation:
-  report_threshold: 3  # Reports needed to reject content
+  report_threshold: 3  # Default reports needed
   time_window_days: 30  # Only count recent reports
+  auto_delete: true     # Auto-delete when threshold met
 
   # Type-specific thresholds
   type_thresholds:
-    illegal: 1    # Immediate action
+    illegal: 1          # Immediate removal
     malware: 1
-    spam: 5       # More tolerance
+    spam: 5             # More tolerance
+    impersonation: 2
 
-# Relays to monitor for reports
-relays:
-  monitor:
-    - "wss://relay.damus.io"
-    - "wss://relay.nostr.band"
-    # Add more relays...
+# Strfry configuration
+strfry:
+  executable: "/usr/local/bin/strfry"
+  data_dir: "/var/lib/strfry"  # Directory with strfry.conf
 
-# Event kinds to protect (thelookup-specific)
+  # Publish kind 5 delete events
+  publish_deletes: true
+  publish_relays:
+    - "wss://wot.nostr.net"
+
+# Event kinds to monitor (thelookup-specific)
 events:
   monitored_kinds:
     - 30817  # Custom NIPs
     - 31990  # Application directory
 ```
 
+### Important Notes
+
+- **wot.nostr.net**: The relay already filters by your Web of Trust, so you only see reports from trusted users
+- **private_key**: Only needed if you want to publish kind 5 delete events (optional)
+- **strfry paths**: Adjust `executable` and `data_dir` to match your installation
+
 ## Usage
 
-### Running the Monitor Daemon
-
-The daemon should run continuously to collect reports:
+### Run Directly
 
 ```bash
-# Run directly
 python3 lookup_moderator.py
 
-# Or with custom config
+# With custom config
 python3 lookup_moderator.py --config /path/to/config.yaml
-
-# Run in background
-nohup python3 lookup_moderator.py > monitor.log 2>&1 &
 ```
 
-**As a systemd service** (recommended for production):
+### Run as Systemd Service (Recommended)
 
 Create `/etc/systemd/system/lookup-moderator.service`:
 
@@ -153,9 +127,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=nostr
+User=strfry
 WorkingDirectory=/path/to/lookup-moderator
-ExecStart=/path/to/venv/bin/python3 lookup_moderator.py
+ExecStart=/usr/bin/python3 /path/to/lookup-moderator/lookup_moderator.py
 Restart=always
 RestartSec=10
 
@@ -163,7 +137,7 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-Then enable and start:
+Enable and start:
 
 ```bash
 sudo systemctl enable lookup-moderator
@@ -171,62 +145,32 @@ sudo systemctl start lookup-moderator
 sudo systemctl status lookup-moderator
 ```
 
-### Integrating with Strfry
-
-Edit your strfry configuration file (usually `/etc/strfry/strfry.conf` or `strfry.conf`):
-
-```conf
-writePolicy {
-    # Path to the moderation plugin
-    plugin = "/path/to/lookup-moderator/strfry_moderation_plugin.py"
-}
-```
-
-Make sure the plugin is executable:
+### Monitor Logs
 
 ```bash
-chmod +x strfry_moderation_plugin.py
+# Real-time logs
+tail -f moderator.log
+
+# Systemd logs
+sudo journalctl -u lookup-moderator -f
 ```
 
-Restart strfry:
+## How Deletion Works
 
-```bash
-sudo systemctl restart strfry
-```
+When a report threshold is reached:
 
-### Testing the Plugin
+1. **Strfry CLI Delete**: Executes `strfry delete --dir /path --id <event_id>`
+   - Removes event from local strfry database
+   - Immediate local deletion
 
-Test the plugin manually with sample input:
+2. **Publish Delete Event** (optional): Creates and publishes kind 5 event
+   - Notifies other relays to delete the content
+   - Per [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md)
+   - Requires private key in config
 
-```bash
-echo '{"type":"new","event":{"id":"test123","kind":30817,"pubkey":"...","created_at":1234567890,"content":"test","tags":[],"sig":"..."},"receivedAt":1234567890,"sourceType":"IP4","sourceInfo":"127.0.0.1"}' | python3 strfry_moderation_plugin.py
-```
+## Report Types (NIP-56)
 
-Expected output:
-```json
-{"id":"test123","action":"accept"}
-```
-
-## Understanding Web of Trust (WoT)
-
-This system uses Web of Trust to prevent abuse:
-
-1. You configure a source pubkey (usually your own)
-2. The system queries that pubkey's follow list (kind 3 events)
-3. With depth=2, it also queries follows-of-follows
-4. Only reports from pubkeys in this network are counted
-
-**Example**:
-- You follow 200 people (depth 1)
-- They follow 10,000 people combined (depth 2)
-- Your WoT contains ~10,200 pubkeys
-- Only reports from these 10,200 pubkeys count toward thresholds
-
-This prevents random attackers from spamming fake reports.
-
-## Report Types
-
-Per [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md), these report types are supported:
+Per [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md):
 
 - `nudity` - Explicit content
 - `malware` - Malicious software
@@ -236,95 +180,149 @@ Per [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md), these re
 - `impersonation` - False identity
 - `other` - Other issues
 
-You can set different thresholds per type in `config.yaml`.
+Set different thresholds per type in config.
 
 ## Database
 
-The system uses SQLite to store:
+SQLite database stores:
+- All kind 1984 reports
+- Reporter pubkeys
+- Report types and timestamps
+- Reported event IDs
 
-- **reports**: All kind 1984 reports with timestamps, types, and reporter pubkeys
-- **wot_cache**: Cached Web of Trust pubkeys
+**Location**: `./moderation_reports.db` (configurable)
 
-Database location is configurable (default: `./moderation_reports.db`).
+**Auto-cleanup**: Old reports are automatically removed based on `time_window_days × 2`
 
-### Database Cleanup
-
-Old reports are automatically cleaned up based on configuration:
-
-```yaml
-database:
-  auto_cleanup: true
-  cleanup_interval_hours: 24
-```
-
-Reports older than `2 × time_window_days` are removed.
-
-## Monitoring & Logs
-
-### Monitor Daemon Logs
+### Query Database
 
 ```bash
-# View real-time logs
-tail -f moderator.log
+# View all reports
+sqlite3 moderation_reports.db "SELECT * FROM reports;"
 
-# Check systemd logs
-sudo journalctl -u lookup-moderator -f
+# Count reports per event
+sqlite3 moderation_reports.db "
+  SELECT reported_event_id, COUNT(*) as count
+  FROM reports
+  GROUP BY reported_event_id
+  ORDER BY count DESC;
+"
+
+# Reports by type
+sqlite3 moderation_reports.db "
+  SELECT report_type, COUNT(*) as count
+  FROM reports
+  GROUP BY report_type;
+"
 ```
 
-### Plugin Logs
-
-Strfry plugin logs to stderr, which strfry captures. Check your strfry logs:
-
-```bash
-sudo journalctl -u strfry -f
-```
-
-### Database Statistics
-
-The monitor daemon shows statistics on startup and shutdown:
+## Example Output
 
 ```
+================================================================================
+Lookup Moderator - Nostr Kind 1984 Event Monitor
+================================================================================
 Database stats:
   Total reports: 47
   Unique reported events: 12
   Unique reporters: 23
-  WoT cache size: 8,432
+
+Configuration:
+  WoT Relay: wss://wot.nostr.net
+  Report threshold: 3
+  Time window: 30 days
+  Auto-delete: True
+  Monitored kinds: [30817, 31990]
+
+Connecting to wss://wot.nostr.net...
+  Added relay: wss://wot.nostr.net
+Connected to relay!
+Subscribing to kind 1984 moderation events...
+Monitoring started. Press Ctrl+C to stop.
+
+================================================================================
+NEW MODERATION REPORT
+Report ID: abc123def456...
+Reporter: 789pubkey012...
+Reported Event: xyz789event...
+Report Type: spam
+Content: This is spam content reported by user
+Total reports: 3 (threshold: 3)
+⚠️  THRESHOLD REACHED - Event should be deleted!
+Auto-delete enabled, deleting event...
+Executing: /usr/local/bin/strfry delete --dir /var/lib/strfry --id xyz789event...
+Successfully deleted event xyz789event... from strfry
+Published delete event for xyz789event... to 1 relays
+✓ Event xyz789event... deleted successfully
+================================================================================
 ```
 
 ## Troubleshooting
 
-### "source_pubkey not set" error
+### Strfry delete command fails
 
-You must configure `wot.source_pubkey` in `config.yaml`:
-
-```yaml
-wot:
-  source_pubkey: "YOUR_PUBKEY_IN_HEX"  # Not npub1..., use hex format
+**Check paths:**
+```bash
+which strfry  # Should match config.yaml executable path
+ls -la /var/lib/strfry  # Should exist and contain strfry.conf
 ```
 
-To convert npub to hex, use a tool like: https://nostrtool.com/
+**Check permissions:**
+```bash
+# Make sure the user running the script can execute strfry
+sudo -u strfry /usr/local/bin/strfry delete --help
+```
 
-### WoT is empty or very small
+**Test manually:**
+```bash
+# Try deleting an event manually
+/usr/local/bin/strfry delete --dir /var/lib/strfry --id <some_event_id>
+```
 
-- Make sure your source pubkey has a follow list (kind 3 event) published
-- Increase `wot.depth` (but this increases build time)
-- Check that relays in config have your follow list
+### Not seeing any reports
 
-### Events not being rejected
+- Make sure wot.nostr.net is accessible: `curl -I https://wot.nostr.net`
+- Check you're in someone's Web of Trust (wot.nostr.net filters by WoT)
+- Verify monitored_kinds includes the events being reported
+- Check logs for connection errors
 
-1. Make sure monitor daemon is running and collecting reports
-2. Check database has reports: `sqlite3 moderation_reports.db "SELECT COUNT(*) FROM reports;"`
-3. Verify event kind is in `events.monitored_kinds`
-4. Check report count meets threshold
-5. Ensure reports are within time window
-6. Verify strfry plugin is configured correctly
+### Delete events not being published
 
-### Plugin not working with strfry
+- Make sure `private_key` is set in config
+- Verify `publish_deletes: true`
+- Check `publish_relays` list is not empty
+- Look for errors in logs about key parsing
 
-- Make sure plugin is executable: `chmod +x strfry_moderation_plugin.py`
-- Check Python shebang is correct: `#!/usr/bin/env python3`
-- Verify config.yaml path is accessible from strfry's working directory
-- Test plugin manually (see "Testing the Plugin" section)
+## Security Considerations
+
+### Private Key Storage
+
+If publishing delete events:
+- Store `config.yaml` with restricted permissions: `chmod 600 config.yaml`
+- Consider using environment variables for private key
+- Or use a dedicated moderation keypair (not your main key)
+
+### Trust Model
+
+- **WoT filtering**: wot.nostr.net only shows reports from your trust network
+- **Threshold-based**: Multiple reports required (configurable)
+- **Time-bounded**: Old reports expire
+- **Transparent**: All reports in local database
+
+### Attack Vectors
+
+1. **Report spam**: Mitigated by WoT filtering (only trusted reporters)
+2. **False reports**: Mitigated by threshold requirements
+3. **Stale reports**: Mitigated by time windows
+4. **Mass deletion**: Set appropriate thresholds per type
+
+## Performance
+
+- **CPU**: Low (event-driven)
+- **Memory**: ~50-100 MB
+- **Network**: Minimal (single relay connection)
+- **Disk**: Database grows ~1 KB per report
+- **Latency**: Delete executes within seconds of threshold
 
 ## Development
 
@@ -333,78 +331,44 @@ To convert npub to hex, use a tool like: https://nostrtool.com/
 ```
 lookup-moderator/
 ├── lookup_moderator.py        # Main monitoring daemon
-├── strfry_moderation_plugin.py  # Strfry write policy plugin
-├── moderation_db.py           # Database abstraction layer
-├── wot_fetcher.py             # Web of Trust builder
-├── config.yaml                # Configuration file
+├── moderation_db.py           # SQLite database abstraction
+├── config.yaml.example        # Configuration template
 ├── requirements.txt           # Python dependencies
 └── README.md                  # This file
 ```
 
-### Running Tests
+### Testing
 
 ```bash
-# Test database module
-python3 -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'); print('DB OK')"
+# Test database
+python3 -c "from moderation_db import ModerationDB; db = ModerationDB(':memory:'); print('OK')"
 
-# Test WoT fetcher (requires config)
-python3 -c "import asyncio; from wot_fetcher import WoTFetcher; asyncio.run(WoTFetcher([]).get_follows('test'))"
+# Test config loading
+python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')))"
+
+# Dry run (auto_delete: false in config)
+python3 lookup_moderator.py
 ```
-
-## Security Considerations
-
-### Trust Model
-
-- **WoT-based trust**: Only reports from your trust network count
-- **Threshold-based**: Multiple reports required (configurable)
-- **Time-bounded**: Old reports expire
-- **Transparent**: All reports stored in local database
-
-### Attack Vectors & Mitigations
-
-1. **Report spam from single actor**: Mitigated by unique reporter counting
-2. **Sybil attack**: Mitigated by WoT filtering (attacker needs to be in your network)
-3. **Coordinated false reports**: Mitigated by threshold requirements
-4. **Stale reports**: Mitigated by time windows
-
-### Privacy
-
-- The system queries public Nostr data only
-- No private keys are required
-- WoT is built from public follow lists
-- All data stored locally
-
-## Performance
-
-### Monitor Daemon
-
-- CPU: Low (event-driven)
-- Memory: ~50-100 MB
-- Network: Depends on relay count and activity
-- Disk: Database grows ~1 KB per report
-
-### Strfry Plugin
-
-- Latency: <10ms per event (database query)
-- CPU: Minimal (only queries monitored kinds)
-- No network requests
 
 ## FAQ
 
 **Q: Do I need to run my own relay?**
-A: Not for the monitor, but the strfry plugin requires a strfry relay.
+A: Yes, you need a strfry relay to delete content from.
 
-**Q: Can I use this without strfry?**
-A: Yes! The monitor daemon works standalone. You can query the database manually or build your own integration.
+**Q: Can I use other relays besides wot.nostr.net?**
+A: Technically yes, but you'd lose the WoT filtering. wot.nostr.net is recommended because it already filters by your trust network.
 
-**Q: How often is WoT refreshed?**
-A: Configurable via `wot.cache_hours` (default: 24 hours).
+**Q: What if I don't want to auto-delete?**
+A: Set `auto_delete: false` in config. The script will log when threshold is met but won't delete.
 
 **Q: Can I moderate kinds other than 30817/31990?**
-A: Yes, just add them to `events.monitored_kinds` in config.
+A: Yes, add them to `events.monitored_kinds` in config.
 
-**Q: What if someone in my WoT submits false reports?**
-A: You can remove them from your follow list, which will update your WoT on next refresh. Consider using a dedicated moderation pubkey with carefully curated follows.
+**Q: How do I know what's in my WoT on wot.nostr.net?**
+A: wot.nostr.net uses your follow list (kind 3) and follows-of-follows. If you publish a follow list, you're in the network.
+
+**Q: Can I run this without publishing delete events?**
+A: Yes! Just leave `private_key` empty or set `publish_deletes: false`. The local deletion will still work.
 
 ## Contributing
 
@@ -426,17 +390,17 @@ See LICENSE file for details.
 - [thelookup](https://github.com/nostr-net/thelookup) - Nostr ecosystem directory
 - [strfry](https://github.com/hoytech/strfry/) - High-performance Nostr relay
 - [nostr-sdk](https://github.com/rust-nostr/nostr) - Rust Nostr SDK with Python bindings
+- [wot.nostr.net](https://wot.nostr.net) - Web of Trust filtered relay
 
 ### NIP References
 
 - [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) - Basic protocol
+- [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) - Event deletion (kind 5)
 - [NIP-56](https://github.com/nostr-protocol/nips/blob/master/56.md) - Reporting (kind 1984)
-- [Kind 30817](https://github.com/nostr-protocol/nips/blob/master/01.md#kinds) - Parameterized replaceable events
 
 ## Support
 
 - GitHub Issues: https://github.com/nostr-net/lookup-moderator/issues
-- Nostr: Contact via the maintainer's pubkey in config
 
 ---
 
